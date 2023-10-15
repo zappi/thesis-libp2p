@@ -2,12 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"math/rand"
-	"sync"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
@@ -20,9 +19,10 @@ import (
 )
 
 type SingleMessage struct {
-	Message string
-	self    peer.ID
-	Sender  peer.ID
+	Message  string
+	self     peer.ID
+	Sender   peer.ID
+	NodeName string
 }
 
 type discoveryNotifee struct {
@@ -30,25 +30,25 @@ type discoveryNotifee struct {
 }
 
 func main() {
-	numInstances := 1
-	wg := sync.WaitGroup{}
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go run main.go <port_number>")
+		os.Exit(1)
+	}
+	portStr := os.Args[1]
+	nodeName := os.Args[2]
 
-	var port int
-	flag.IntVar(&port, "port", 0, "Port number")
-	flag.Parse()
-
-	for i := 0; i < numInstances; i++ {
-		wg.Add(1)
-		go startInstance(&wg, i, port)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		fmt.Println("Invalid port number:", err)
+		os.Exit(1)
 	}
 
-	wg.Wait()
-	fmt.Println("All instances have completed.")
+	fmt.Printf("Selected port: %d\n", port)
+
+	startInstance(port, nodeName)
 }
 
-func startInstance(wg *sync.WaitGroup, instanceID int, port int) {
-	defer wg.Done()
-	fmt.Printf("Instance %d started\n", instanceID)
+func startInstance(port int, nodeName string) {
 
 	ctx := context.Background()
 
@@ -60,9 +60,11 @@ func startInstance(wg *sync.WaitGroup, instanceID int, port int) {
 		panic(err)
 	}
 
-	rand.Seed(time.Now().UnixNano()) // Seed the random number generator with the current time
+	rand.Seed(time.Now().UnixNano())
 
-	listenAddr := fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", port)
+	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", port)
+
+	fmt.Println(listenAddr)
 
 	h, err := libp2p.New(libp2p.Transport(
 		libp2pquic.NewTransport),
@@ -73,44 +75,52 @@ func startInstance(wg *sync.WaitGroup, instanceID int, port int) {
 		panic(err)
 	}
 
-	ps, err := pubsub.NewGossipSub(ctx, h)
+	ps, err := pubsub.NewGossipSub(ctx, h, pubsub.WithMaxMessageSize(4096))
 	if err != nil {
 		panic(err)
 	}
 
-	peerChan := initMDNS(h, "asd123")
+	peerChan := initMDNS(h, "mdns-rendezvous")
 
 	for {
-		peer := <-peerChan // will block until we discover a peer
+		peer := <-peerChan
 
 		if err := h.Connect(ctx, peer); err != nil {
 			fmt.Println("Connection failed:", err)
 			continue
 		}
 
-		sub, topic, err := JoinGossip(ps, "huone 105")
+		sub, topic, err := JoinGossip(ps, "topic1")
 		if err != nil {
 			fmt.Println("Error joining gossip:", err)
 			return
 		}
 
-		go readLoop(ctx, sub, h.ID(), instanceID)
-		go NewMessageSender(ctx, topic, h.ID())
+		go readLoop(ctx, sub, h.ID())
+		go messageSender(ctx, topic, h.ID(), nodeName)
+		go sendTimestampPeriodically(ctx, topic, h.ID(), nodeName)
+	}
 
-		fmt.Println("end of loop")
+}
 
+func sendTimestampPeriodically(ctx context.Context, topic *pubsub.Topic, id peer.ID, nodeName string) {
+	for {
+		randomInterval := time.Duration(rand.Intn(16)+5) * time.Second
+
+		time.Sleep(randomInterval)
+
+		timestampMessage := SingleMessage{
+			Message:  time.Now().Format("2006-01-02 15:04"),
+			self:     id,
+			Sender:   id,
+			NodeName: nodeName,
+		}
+		sendGeneratedMessage(timestampMessage, ctx, topic, id)
 	}
 }
 
-func generateRandomInterval() time.Duration {
-
-	minInterval := 30 * time.Second
-	maxInterval := 60 * time.Second
-	return minInterval + time.Duration(rand.Int63n(int64(maxInterval-minInterval)))
-}
-
-func JoinGossip(ps *pubsub.PubSub, roomName string) (*pubsub.Subscription, *pubsub.Topic, error) {
-	topic, err := ps.Join(roomName)
+func JoinGossip(ps *pubsub.PubSub, topicName string) (*pubsub.Subscription, *pubsub.Topic, error) {
+	topic, err := ps.Join(topicName)
 	if err != nil {
 		panic(err)
 	}
@@ -123,42 +133,17 @@ func JoinGossip(ps *pubsub.PubSub, roomName string) (*pubsub.Subscription, *pubs
 	return sub, topic, err
 }
 
-func readLoop(ctx context.Context, sub *pubsub.Subscription, myId peer.ID, instanceID int) {
-	fmt.Println("Luetaan....")
-	for {
-		msg, err := sub.Next(ctx)
-		fmt.Println(msg)
-		if err != nil {
-			fmt.Println("Reading loop error:", err)
-			panic(err)
-		}
-
-		sm := new(SingleMessage)
-		err = json.Unmarshal(msg.Data, sm)
-
-		if sm.Sender == myId {
-			continue
-		}
-
-		if err != nil {
-			panic(err)
-
-		}
-		fmt.Println("Instance: ", instanceID, "reading message", sm.Message)
-	}
-}
-
 func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
-	fmt.Printf("discovered new peer %s\n", pi.ID.Pretty())
+	fmt.Printf("Discovered new peer %s\n", pi.ID.Pretty())
 	n.PeerChan <- pi
 }
 
 func initMDNS(peerhost host.Host, rendezvous string) chan peer.AddrInfo {
-	n := &discoveryNotifee{}
-	n.PeerChan = make(chan peer.AddrInfo)
-	ser := mdns.NewMdnsService(peerhost, rendezvous+"asd", n)
-	if err := ser.Start(); err != nil {
+	notifee := &discoveryNotifee{}
+	notifee.PeerChan = make(chan peer.AddrInfo)
+	mdnsService := mdns.NewMdnsService(peerhost, rendezvous, notifee)
+	if err := mdnsService.Start(); err != nil {
 		panic(err)
 	}
-	return n.PeerChan
+	return notifee.PeerChan
 }
