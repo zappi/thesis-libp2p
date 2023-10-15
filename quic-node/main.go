@@ -82,18 +82,18 @@ func startInstance(port int, nodeName string) {
 
 	peerChan := initMDNS(h, "mdns-rendezvous")
 
+	sub, topic, err := JoinGossip(ps, "topic1")
+	if err != nil {
+		fmt.Println("Error joining gossip:", err)
+		return
+	}
+
 	for {
 		peer := <-peerChan
 
 		if err := h.Connect(ctx, peer); err != nil {
 			fmt.Println("Connection failed:", err)
 			continue
-		}
-
-		sub, topic, err := JoinGossip(ps, "topic1")
-		if err != nil {
-			fmt.Println("Error joining gossip:", err)
-			return
 		}
 
 		go readLoop(ctx, sub, h.ID())
@@ -124,7 +124,7 @@ func JoinGossip(ps *pubsub.PubSub, topicName string) (*pubsub.Subscription, *pub
 	if err != nil {
 		panic(err)
 	}
-	defer topic.Close()
+
 	sub, err := topic.Subscribe()
 	if err != nil {
 		panic(err)

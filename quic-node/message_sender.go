@@ -1,24 +1,35 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 func messageSender(ctx context.Context, topic *pubsub.Topic, id peer.ID, nodeName string) error {
+	reader := bufio.NewReader(os.Stdin)
+
 	for {
-		var userInput string
-		fmt.Scanln(&userInput)
+		userInput, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("Error reading input:", err)
+			continue
+		}
+
+		// Trim spaces and newlines from the input
+		userInput = strings.TrimSpace(userInput)
 
 		message := SingleMessage{
-			userInput,
-			id,
-			id,
-			nodeName,
+			Message:  userInput,
+			self:     id,
+			Sender:   id,
+			NodeName: nodeName,
 		}
 
 		msgBytes, err := json.Marshal(message)
